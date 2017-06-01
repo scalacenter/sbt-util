@@ -314,7 +314,6 @@ trait Init[Scope] {
 
       // separate `derived` settings from normal settings (`defs`)
       val (derived, rawDefs) = Util.separate[Setting[_], Derived, Setting[_]](init) { case d: DerivedSetting[_] => Left(new Derived(d)); case s => Right(s) }
-      val defs = addLocal(rawDefs)(scopeLocal)
 
       // group derived settings by the key they define
       val derivsByDef = new mutable.HashMap[AttributeKey[_], Deriveds]
@@ -330,11 +329,14 @@ trait Init[Scope] {
 
       // Map a DerivedSetting[_] to the `Derived` struct wrapping it. Used to ultimately replace a DerivedSetting with
       // the `Setting`s that were actually derived from it: `Derived.outputs`
-      val derivedToStruct: Map[DerivedSetting[_], Derived] = (derived map { s => s.setting -> s }).toMap
+      val derivedToStruct: Map[DerivedSetting[_], Derived] =
+        derived.iterator.map(s => s.setting -> s).toMap
 
       // set of defined scoped keys, used to ensure a derived setting is only added if all dependencies are present
       val defined = new mutable.HashSet[ScopedKey[_]]
       def addDefs(ss: Seq[Setting[_]]): Unit = { for (s <- ss) defined += s.key }
+
+      val defs = addLocal(rawDefs)(scopeLocal)
       addDefs(defs)
 
       // true iff the scoped key is in `defined`, taking delegation into account
@@ -342,8 +344,8 @@ trait Init[Scope] {
         delegates(scope).exists(s => defined.contains(ScopedKey(s, key)))
 
       // true iff all dependencies of derived setting `d` have a value (potentially via delegation) in `scope`
-      def allDepsDefined(d: Derived, scope: Scope, local: Set[AttributeKey[_]]): Boolean =
-        d.dependencies.forall(dep => local(dep) || isDefined(dep, scope))
+      def allDepsDefined(dependencies: Seq[AttributeKey[_]], scope: Scope, local: Set[AttributeKey[_]]): Boolean =
+        dependencies.forall(dep => local(dep) || isDefined(dep, scope))
 
       // Returns the list of injectable derived settings and their local settings for `sk`.
       // The settings are to be injected under `outputScope` = whichever scope is more specific of:
@@ -356,38 +358,45 @@ trait Init[Scope] {
       //   3. all of its dependencies are defined for outputScope (allowing for delegation)
       // This needs to handle local settings because a derived setting wouldn't be injected if it's local setting didn't exist yet.
       val deriveFor = (sk: ScopedKey[_]) => {
-        val derivedForKey: List[Derived] = derivedBy.get(sk.key).toList.flatten
         val scope = sk.scope
         def localAndDerived(d: Derived): Seq[Setting[_]] = {
-          def definingScope = d.setting.key.scope
+          val derivedSetting = d.setting
+          val definingScope = derivedSetting.key.scope
           val outputScope = intersect(scope, definingScope)
+          val derivedInScopes = d.inScopes
+          val derivedDependencies = d.dependencies
+          val settingFilter = derivedSetting.filter
           outputScope collect {
-            case s if !d.inScopes.contains(s) && d.setting.filter(s) =>
-              val local = d.dependencies.flatMap(dep => scopeLocal(ScopedKey(s, dep)))
-              if (allDepsDefined(d, s, local.map(_.key.key).toSet)) {
-                d.inScopes.add(s)
-                val out = local :+ d.setting.setScope(s)
+            case s if !derivedInScopes.contains(s) && settingFilter.apply(s) =>
+              val local = derivedDependencies.flatMap(dep => scopeLocal(ScopedKey(s, dep)))
+              val localKeys = local.iterator.map(_.key.key).toSet
+              if (allDepsDefined(derivedDependencies, s, localKeys)) {
+                derivedInScopes.add(s)
+                val out = local :+ derivedSetting.setScope(s)
                 d.outputs ++= out
                 out
-              } else
-                Nil
+              } else Nil
           } getOrElse Nil
         }
-        derivedForKey.flatMap(localAndDerived)
+
+        val scopeKey = sk.key
+        derivedBy.get(scopeKey) match {
+          case Some(derived) => derived.flatMap(localAndDerived)
+          case None          => Nil
+        }
       }
 
       val processed = new mutable.HashSet[ScopedKey[_]]
-
       // derives settings, transitively so that a derived setting can trigger another
-      def process(rem: List[Setting[_]]): Unit = rem match {
-        case s :: ss =>
+      def process(rem: Seq[Setting[_]]): Unit = rem match {
+        case s +: ss =>
           val sk = s.key
           val ds = if (processed.add(sk)) deriveFor(sk) else Nil
           addDefs(ds)
-          process(ds ::: ss)
+          process(ds ++ ss)
         case Nil =>
       }
-      process(defs.toList)
+      process(defs)
 
       // Take all the original defs and DerivedSettings along with locals, replace each DerivedSetting with the actual
       // settings that were derived.
