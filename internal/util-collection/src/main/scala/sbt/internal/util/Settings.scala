@@ -313,7 +313,10 @@ trait Init[Scope] {
       }
 
       // separate `derived` settings from normal settings (`defs`)
-      val (derived, rawDefs) = Util.separate[Setting[_], Derived, Setting[_]](init) { case d: DerivedSetting[_] => Left(new Derived(d)); case s => Right(s) }
+      val (derived, rawDefs) = Util.separate[Setting[_], Derived, Setting[_]](init) {
+        case d: DerivedSetting[_] => Left(new Derived(d))
+        case s                    => Right(s)
+      }
 
       // group derived settings by the key they define
       val derivsByDef = new mutable.HashMap[AttributeKey[_], Deriveds]
